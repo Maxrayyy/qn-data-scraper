@@ -11,6 +11,7 @@ from app.steps import (
     StepsContext,
     TaskStopped,
     _click_nav,
+    _dismiss_baxia_dialog,
     _dismiss_baxia_iframe,
     _locate_first,
     _run_step,
@@ -288,5 +289,23 @@ async def test_dismiss_baxia_iframe_closes():
         hit = await page.frame_locator("#baxia-dialog-content").locator(".close-btn").evaluate(
             "el => el.dataset.hit"
         )
+        assert hit == "1"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_dismiss_baxia_dialog_main_doc_x():
+    """主文档中的 baxia 安全弹窗（遮罩+右上角X）应能被自动关闭。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content('<div class="baxia-dialog-mask"></div><div class="baxia-dialog auto"><span id="x">X</span></div>')
+        await page.locator("#x").evaluate(
+            "el => el.addEventListener('click', () => { el.dataset.hit = '1'; })"
+        )
+        assert await _dismiss_baxia_dialog(page) == 1
+        hit = await page.locator("#x").evaluate("el => el.dataset.hit")
         assert hit == "1"
         await browser.close()

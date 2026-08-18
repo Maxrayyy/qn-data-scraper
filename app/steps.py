@@ -280,7 +280,7 @@ async def _run_step(
     hit = await detect_captcha(page)
     if hit and hit == "无痕验证":
         # baxia 安全检测弹窗优先自动关闭（关闭按钮在 iframe 内）；关不掉才等人工
-        if await _dismiss_baxia_iframe(page):
+        if (await _dismiss_baxia_dialog(page)) or (await _dismiss_baxia_iframe(page)):
             hit = await detect_captcha(page)
             if not hit:
                 ctx.emit("info", "安全检测弹窗已自动关闭。")
@@ -473,6 +473,7 @@ async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
                 break
         await asyncio.sleep(0.5)
     # 安全检测弹窗（baxia iframe，关闭按钮在 iframe 内部）单独处理
+    closed += await _dismiss_baxia_dialog(page)
     closed += await _dismiss_baxia_iframe(page)
     if closed:
         ctx.emit("info", f"已关闭 {closed} 个遮挡弹窗。")
@@ -518,6 +519,30 @@ async def _step_click_data(page: Page, ctx: StepsContext) -> Page:
     return new_page
 
 
+async def _dismiss_baxia_dialog(page: Page) -> int:
+    """关闭 baxia 安全提示弹窗（主文档 div.baxia-dialog + 遮罩，关闭按钮为右上角 X）。
+
+    实证：该弹窗渲染在主文档中（div.baxia-dialog-mask 全屏遮罩 + div.baxia-dialog，
+    弹窗文本为 "X"），并非在 iframe 内。返回关闭数量。
+    """
+    for sel in [
+        "//div[contains(@class,'baxia-dialog')]//*[normalize-space()='X']",
+        "//div[contains(@class,'baxia-dialog')]//*[normalize-space()='×']",
+        ".baxia-dialog [class*='close']",
+        ".baxia-dialog .icon-close",
+    ]:
+        try:
+            loc = page.locator(sel)
+            n = await loc.count()
+            for i in range(min(n, 3)):
+                if await loc.nth(i).is_visible():
+                    await loc.nth(i).click()
+                    return 1
+        except Exception:
+            continue
+    return 0
+
+
 async def _dismiss_baxia_iframe(page: Page) -> int:
     """尝试关闭 baxia 安全检测弹窗（关闭按钮在 iframe 内部），返回关闭数量。"""
     try:
@@ -527,6 +552,16 @@ async def _dismiss_baxia_iframe(page: Page) -> int:
             "//*[normalize-space()='知道了']",
             "a[class*='close']",
             "[class*='close-btn']",
+            # 右上角 × 的常见写法（icon 字体类名 / aria-label / 纯字符）
+            "[class*='icon-close']",
+            ".next-icon-close",
+            "[class*='close-icon']",
+            "//*[@aria-label='关闭']",
+            "//*[@aria-label='close']",
+            "//*[normalize-space()='×']",
+            "//*[normalize-space()='✕']",
+            "//*[normalize-space()='x']",
+            "button:has-text('×')",
         ]:
             try:
                 loc = bf.locator(sel)
