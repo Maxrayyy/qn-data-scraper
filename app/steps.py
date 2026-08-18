@@ -37,9 +37,18 @@ MAX_RETRIES = 2                          # 每步失败自动重试次数
 CAPTCHA_MAX_WAIT_SECONDS = 600           # 验证码最长人工等待时间（秒）
 SMS_VERIFY_MAX_WAIT_SECONDS = 300        # 短信验证身份最长人工等待时间（秒）
 LOGIN_IFRAME = "#alibaba-login-box"   # ★ 登录表单所在 iframe（淘宝 havana 登录框，改版时检查）
+XSTORE_IFRAME = "#alife-xstore-client"  # ★ 数据中心应用 iframe（市场/类目洞察/价格分析在其中，改版时检查）
 LOGIN_SUCCESS_DOMAINS = ["qn.taobao.com"]      # 登录成功判据一：URL 域名（netloc 匹配）
 LOGIN_SUCCESS_TEXTS = ["工作台"]               # 登录成功判据二：页面出现标志文字
-LOGIN_FAIL_TEXTS = ["密码错误", "账号或密码不正确", "登录名不存在", "验证失败"]
+LOGIN_FAIL_TEXTS = {                          # 登录失败判据：页面提示文字 → 处理建议
+    "密码错误": "请检查账号密码",
+    "账号或密码不正确": "请检查账号密码",
+    "登录名不存在": "请检查账号密码",
+    "验证失败": "请检查账号密码",
+    "异常访问": "账号可能被平台风控限制：请立即停用工具，用普通浏览器手动登录确认，待限制解除后再谨慎使用",
+    "安全提示": "账号可能被平台风控限制：请立即停用工具，用普通浏览器手动登录确认，待限制解除后再谨慎使用",
+    "限制访问": "账号被平台限制访问：请立即停用工具，用普通浏览器手动登录确认",
+}
 
 # ============================ 元素定位器 ============================
 # 每个键对应一组候选定位器，按顺序尝试，取第一个"可见"的元素。
@@ -69,21 +78,25 @@ STEP_LOCATORS: dict[str, list[str]] = {
     ],
     # ---- 千牛工作台导航 ----
     "左侧数据菜单": [
+        "//a[.//span[normalize-space()='数据']]",
         "//span[normalize-space()='数据']",
         'text="数据"',
         "//*[normalize-space()='数据']",
     ],
     "上方市场页签": [
+        "//a[.//span[normalize-space()='市场']]",
         "//span[normalize-space()='市场']",
         'text="市场"',
         "//*[normalize-space()='市场']",
     ],
     "左侧类目洞察菜单": [
+        "//a[.//span[normalize-space()='类目洞察']]",
         "//span[normalize-space()='类目洞察']",
         'text="类目洞察"',
         "//*[normalize-space()='类目洞察']",
     ],
     "价格分析页签": [
+        "//a[.//span[normalize-space()='价格分析']]",
         "//span[normalize-space()='价格分析']",
         'text="价格分析"',
         "//*[normalize-space()='价格分析']",
@@ -310,6 +323,28 @@ async def _locate_first(root, key: str) -> Locator | None:
     return None
 
 
+def _nav_roots(page: Page, frames: list[str]):
+    """导航搜索根列表：主框架 + 指定 iframe（数据中心应用在 xstore iframe 内）。"""
+    roots: list[tuple[str, object]] = [("main", page)]
+    for fid in frames:
+        try:
+            roots.append((fid, page.frame_locator(fid)))
+        except Exception:
+            continue
+    return roots
+
+
+async def _locate_first_in_frames(
+    page: Page, key: str, frames: list[str] | None = None
+) -> tuple[Locator | None, str]:
+    """在主框架与指定 iframe 中依次查找第一个可见元素；返回 (元素, 来源框架)。"""
+    for name, root in _nav_roots(page, frames or []):
+        el = await _locate_first(root, key)
+        if el is not None:
+            return el, name
+    return None, ""
+
+
 async def _check_remember_password(frame) -> None:
     """勾选登录框内"记住密码"复选框（尽力而为：让淘宝信任本设备，减少短信验证）。"""
     try:
@@ -340,11 +375,14 @@ async def _check_remember_password(frame) -> None:
         pass
 
 
-async def _locate_selector_with_hits(page: Page, key: str) -> str | None:
-    """返回 STEP_LOCATORS[key] 中第一个存在可见元素的候选定位器字符串。"""
+async def _locate_selector_with_hits(root, key: str) -> str | None:
+    """返回 STEP_LOCATORS[key] 中第一个存在可见元素的候选定位器字符串。
+
+    root 可为 Page 或 FrameLocator。
+    """
     for sel in STEP_LOCATORS.get(key, []):
         try:
-            loc = page.locator(sel)
+            loc = root.locator(sel)
             n = await loc.count()
             for i in range(min(n, 50)):
                 if await loc.nth(i).is_visible():
@@ -434,9 +472,41 @@ async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
 
 
 async def _click_nav(page: Page, ctx: StepsContext, key: str, name: str) -> None:
-    """导航点击：先关闭可能遮挡的弹窗，再点击目标元素。"""
+    """导航点击：先关闭可能遮挡的弹窗，再在主框架与数据模块 iframe 中查找并点击。"""
     await _dismiss_popups(page, ctx)
-    await _click_first(page, key, name)
+    el, source = await _locate_first_in_frames(page, key, frames=[XSTORE_IFRAME])
+    if el is None:
+        raise StepFailed(f"找不到可点击的元素『{name}』，页面可能已改版（请检查 steps.py 定位器）")
+    if source != "main":
+        ctx.emit("info", f"已在数据模块（{source}）中找到『{name}』。")
+    await _human_click(el)
+
+
+async def _step_click_data(page: Page, ctx: StepsContext) -> None:
+    """第 4 步：点击左侧菜单「数据」并等待数据中心（xstore iframe）加载。"""
+    await _dismiss_popups(page, ctx)
+    el, source = await _locate_first_in_frames(page, "左侧数据菜单")
+    if el is None:
+        raise StepFailed("找不到可点击的元素『数据』，页面可能已改版（请检查 steps.py 定位器）")
+    await _human_click(el)
+    await _wait_xstore_visible(page, ctx)
+
+
+async def _wait_xstore_visible(page: Page, ctx: StepsContext) -> bool:
+    """等待数据中心 iframe 变为可见（『市场』等页签在其中，加载可能较慢）。"""
+    deadline = asyncio.get_event_loop().time() + max(ctx.timeout_ms / 1000, 30)
+    while asyncio.get_event_loop().time() < deadline:
+        _check_stop(ctx)
+        try:
+            iframe = page.locator(XSTORE_IFRAME)
+            if await iframe.count() > 0 and await iframe.nth(0).is_visible():
+                ctx.emit("success", "数据模块已加载。")
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    ctx.emit("warn", "数据模块未在预期时间内加载完成，继续尝试后续步骤（若失败请检查第 4 步）。")
+    return False
 
 
 # ============================ 内置步骤 1-9 ============================
@@ -451,7 +521,7 @@ async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> Flo
     else:
         await _run_step(ctx, 2, "填写账号密码并登录", lambda: _step_login(page, cfg, ctx), page)
         await _run_step(ctx, 3, "等待登录成功跳转工作台", lambda: _step_wait_login(page, ctx), page)
-    await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _click_nav(page, ctx, "左侧数据菜单", "数据"), page)
+    await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _step_click_data(page, ctx), page)
     await _run_step(ctx, 5, "点击上方页签「市场」", lambda: _click_nav(page, ctx, "上方市场页签", "市场"), page)
     await _run_step(ctx, 6, "点击左侧菜单「类目洞察」", lambda: _click_nav(page, ctx, "左侧类目洞察菜单", "类目洞察"), page)
     await _run_step(ctx, 7, "点击「价格分析」", lambda: _click_nav(page, ctx, "价格分析页签", "价格分析"), page)
@@ -548,9 +618,9 @@ async def _step_wait_login(page: Page, ctx: StepsContext) -> None:
         if any(t in body for t in LOGIN_SUCCESS_TEXTS):
             ctx.emit("success", "登录成功，已检测到工作台。")
             return
-        for bad in LOGIN_FAIL_TEXTS:
+        for bad, advice in LOGIN_FAIL_TEXTS.items():
             if bad in body:
-                raise StepFailed(f"登录失败：页面提示『{bad}』，请检查账号密码")
+                raise StepFailed(f"登录失败：页面提示『{bad}』，{advice}")
         await asyncio.sleep(2)
     raise StepFailed("登录超时：等待跳转工作台超过时限，可能遇到验证码或网络问题")
 
@@ -559,14 +629,14 @@ async def _step_wait_login(page: Page, ctx: StepsContext) -> None:
 
 async def _step_switch_category(page: Page, ctx: StepsContext) -> None:
     await _dismiss_popups(page, ctx)
-    switcher = await _locate_first(page, "类目切换区")
+    switcher, _src = await _locate_first_in_frames(page, "类目切换区", frames=[XSTORE_IFRAME])
     if switcher is None:
         raise StepFailed("找不到类目切换区，请检查 steps.py『类目切换区』定位器")
-    await switcher.click()
+    await _human_click(switcher)
     input_box = None
     for _ in range(20):
         _check_stop(ctx)
-        input_box = await _locate_first(page, "类目搜索输入框")
+        input_box, _ = await _locate_first_in_frames(page, "类目搜索输入框", frames=[XSTORE_IFRAME])
         if input_box:
             break
         await asyncio.sleep(0.3)
@@ -577,12 +647,15 @@ async def _step_switch_category(page: Page, ctx: StepsContext) -> None:
     result = None
     for _ in range(20):
         _check_stop(ctx)
-        cands = page.locator(f'//*[normalize-space()="{CATEGORY_NAME}"]')
-        n = await cands.count()
-        for i in range(min(n, 30)):
-            c = cands.nth(i)
-            if await c.is_visible():
-                result = c
+        for _, root in _nav_roots(page, [XSTORE_IFRAME]):
+            cands = root.locator(f'//*[normalize-space()="{CATEGORY_NAME}"]')
+            n = await cands.count()
+            for i in range(min(n, 30)):
+                c = cands.nth(i)
+                if await c.is_visible():
+                    result = c
+                    break
+            if result:
                 break
         if result:
             break
@@ -600,16 +673,23 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
     rows: list[tuple[ProductItem, Path | None]] = []
     processed = 0
     max_guard = 300  # 防御性上限：防止异常情况无限循环
-    btn_sel = await _locate_selector_with_hits(page, "商品发现按钮")
+    # 『商品发现』按钮位于数据中心 iframe 内（价格分析页面），主框架与 xstore 中查找
+    btn_root = None
+    btn_sel = None
+    for name, root in _nav_roots(page, [XSTORE_IFRAME]):
+        sel = await _locate_selector_with_hits(root, "商品发现按钮")
+        if sel:
+            btn_root, btn_sel, btn_source = root, sel, name
+            break
     if btn_sel is None:
         raise StepFailed("页面上找不到『商品发现』按钮，请确认已正确到达价格分析页面")
     while processed < max_guard:
         _check_stop(ctx)
-        buttons = page.locator(btn_sel)
+        buttons = btn_root.locator(btn_sel)
         n = await buttons.count()
         if processed >= n:
-            # 当前可见按钮已处理完：尝试滚动页面加载更多明细
-            new_n = await _scroll_page_and_count(page, btn_sel)
+            # 当前可见按钮已处理完：尝试滚动加载更多明细
+            new_n = await _scroll_root_and_count(btn_root, btn_sel)
             if new_n <= n:
                 break
             continue
@@ -617,7 +697,7 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
         clicked = False
         for _ in range(2):  # 单条最多尝试 2 次
             _check_stop(ctx)
-            btn = page.locator(btn_sel).nth(processed)
+            btn = btn_root.locator(btn_sel).nth(processed)
             try:
                 await _human_click(btn, min_delay=0.3)
                 clicked = True
@@ -647,30 +727,42 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
     return rows
 
 
-async def _scroll_page_and_count(page: Page, btn_sel: str) -> int:
-    """滚动页面到底部（触发懒加载明细），返回滚动后按钮总数。"""
+async def _scroll_root(root) -> None:
+    """滚动 root 内所有可滚动容器到底部（触发懒加载）。root 可为 Page 或 FrameLocator。"""
+    await root.locator("html").evaluate(
+        "el => {"
+        "  const nodes = [document, document.documentElement, document.body, ...document.querySelectorAll('*')];"
+        "  for (const n of nodes) { if (n.scrollHeight > n.clientHeight + 5) { n.scrollTop = n.scrollHeight; } }"
+        "  window.scrollTo(0, document.body.scrollHeight);"
+        "}"
+    )
+
+
+async def _scroll_root_and_count(root, btn_sel: str) -> int:
+    """滚动 root 内可滚动容器到底部（触发懒加载明细），返回滚动后按钮总数。"""
     try:
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await _scroll_root(root)
         await asyncio.sleep(1)
     except Exception:
         pass
-    return await page.locator(btn_sel).count()
+    return await root.locator(btn_sel).count()
 
 
 async def _wait_popup(page: Page, ctx: StepsContext) -> Locator | None:
-    """等待弹窗出现，返回可见的弹窗容器 Locator。"""
+    """等待弹窗出现（主框架与数据中心 iframe 都查），返回可见的弹窗容器 Locator。"""
     for _ in range(int(ctx.timeout_ms / 500)):
         _check_stop(ctx)
-        for sel in STEP_LOCATORS["弹窗容器"]:
-            try:
-                loc = page.locator(sel)
-                n = await loc.count()
-                for i in range(n - 1, -1, -1):  # 新弹窗一般是最后一个
-                    cand = loc.nth(i)
-                    if await cand.is_visible():
-                        return cand
-            except Exception:
-                continue
+        for _, root in _nav_roots(page, [XSTORE_IFRAME]):
+            for sel in STEP_LOCATORS["弹窗容器"]:
+                try:
+                    loc = root.locator(sel)
+                    n = await loc.count()
+                    for i in range(n - 1, -1, -1):  # 新弹窗一般是最后一个
+                        cand = loc.nth(i)
+                        if await cand.is_visible():
+                            return cand
+                except Exception:
+                    continue
         await asyncio.sleep(0.5)
     return None
 
@@ -755,20 +847,23 @@ async def _download_image(ctx: StepsContext, url: str) -> Path | None:
 
 
 async def _close_popup(page: Page, popup: Locator, ctx: StepsContext) -> None:
-    """优先点关闭按钮，失败则按 Esc。"""
+    """优先点关闭按钮（主框架与数据中心 iframe 都查），失败则按 Esc。"""
     try:
         close_btn = None
-        for sel in STEP_LOCATORS["弹窗关闭按钮"]:
-            try:
-                loc = page.locator(sel)
-                n = await loc.count()
-                for i in range(n - 1, -1, -1):
-                    cand = loc.nth(i)
-                    if await cand.is_visible():
-                        close_btn = cand
-                        break
-            except Exception:
-                continue
+        for _, root in _nav_roots(page, [XSTORE_IFRAME]):
+            for sel in STEP_LOCATORS["弹窗关闭按钮"]:
+                try:
+                    loc = root.locator(sel)
+                    n = await loc.count()
+                    for i in range(n - 1, -1, -1):
+                        cand = loc.nth(i)
+                        if await cand.is_visible():
+                            close_btn = cand
+                            break
+                except Exception:
+                    continue
+                if close_btn:
+                    break
             if close_btn:
                 break
         if close_btn:

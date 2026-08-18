@@ -10,8 +10,10 @@ from app.steps import (
     StepFailed,
     StepsContext,
     TaskStopped,
+    _click_nav,
     _locate_first,
     _run_step,
+    _wait_popup,
 )
 
 
@@ -180,3 +182,71 @@ def test_is_login_success_url_login_page_false_positive():
     url = ("https://loginmyseller.taobao.com/?from=taobaoindex&f=top&style=&sub=true"
            "&redirect_url=https%3A%2F%2Fqn.taobao.com%2Fhome.htm%2Fstarb%2Fnebula")
     assert _is_login_success_url(url) is False
+
+
+# ---------- 框架感知导航（数据中心在 xstore iframe 内，离线 fixture 验证） ----------
+
+NAV_FIXTURE = """
+<html><body>
+  <div id="sidebar"><a class="navItem" onclick="this.dataset.clicked='1'">
+    <span class="navItemText">数据</span></a></div>
+  <iframe id="alife-xstore-client" srcdoc='
+    <div class="tabs"><span class="tab">市场</span></div>
+    <div class="modal" style="display:block">弹窗</div>'>
+  </iframe>
+</body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_click_nav_finds_element_in_xstore_iframe():
+    """导航点击应能穿透到数据中心 iframe 内找到『市场』。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(NAV_FIXTURE)
+        # 用 addEventListener 挂监听（srcdoc 中内联 onclick 会因实体解码被截断）
+        await page.frame_locator("#alife-xstore-client").locator(".tab").evaluate(
+            "el => el.addEventListener('click', () => { el.dataset.clicked = '1'; })"
+        )
+        ctx, _log = make_ctx()
+        await _click_nav(page, ctx, "上方市场页签", "市场")
+        clicked = await page.frame_locator("#alife-xstore-client").locator(".tab").evaluate(
+            "el => el.dataset.clicked"
+        )
+        assert clicked == "1"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_click_nav_prefers_wrapping_anchor():
+    """侧边栏菜单点击应优先点击包裹文字的锚点（a 元素）。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(NAV_FIXTURE)
+        ctx, _log = make_ctx()
+        await _click_nav(page, ctx, "左侧数据菜单", "数据")
+        clicked = await page.locator(".navItem").evaluate("el => el.dataset.clicked")
+        assert clicked == "1"
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_popup_finds_dialog_in_iframe():
+    """弹窗检测应覆盖数据中心 iframe 内的弹窗。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(NAV_FIXTURE)
+        ctx, _log = make_ctx()
+        popup = await _wait_popup(page, ctx)
+        assert popup is not None
+        assert "弹窗" in (await popup.inner_text())
+        await browser.close()
