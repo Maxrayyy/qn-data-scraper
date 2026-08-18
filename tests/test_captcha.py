@@ -59,6 +59,38 @@ def test_detect_captcha_miss():
     assert asyncio.run(scenario()) is None
 
 
+def test_detect_captcha_inside_iframe():
+    # 验证码容器位于 iframe 内（如淘宝登录框 iframe 内的 nc 滑块），需扫描全部 frame
+    async def scenario():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.set_content(
+                '<iframe id="loginbox" srcdoc=\'<div id="nc_1_wrapper">滑块</div>\'></iframe>'
+            )
+            result = await detect_captcha(page)
+            await browser.close()
+            return result
+
+    assert asyncio.run(scenario()) == "滑块验证"
+
+
+def test_detect_captcha_iframe_without_captcha():
+    # iframe 内为普通内容、主页面也无验证码 → None
+    async def scenario():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.set_content(
+                '<iframe id="loginbox" srcdoc=\'<div>普通内容</div>\'></iframe>'
+            )
+            result = await detect_captcha(page)
+            await browser.close()
+            return result
+
+    assert asyncio.run(scenario()) is None
+
+
 # ---------- wait_manual_captcha：连续两次干净检测才判解除 ----------
 
 def _dummy_log():

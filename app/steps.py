@@ -33,6 +33,7 @@ from .scraper import (
 CATEGORY_NAME = "猫笼子/猫别墅"        # ★ 要分析的类目名
 MAX_RETRIES = 2                          # 每步失败自动重试次数
 CAPTCHA_MAX_WAIT_SECONDS = 600           # 验证码最长人工等待时间（秒）
+LOGIN_IFRAME = "#alibaba-login-box"   # ★ 登录表单所在 iframe（淘宝 havana 登录框，改版时检查）
 LOGIN_SUCCESS_DOMAINS = ["qn.taobao.com"]      # 登录成功判据一：URL 域名
 LOGIN_SUCCESS_TEXTS = ["工作台"]               # 登录成功判据二：页面出现标志文字
 LOGIN_FAIL_TEXTS = ["密码错误", "账号或密码不正确", "登录名不存在", "验证失败"]
@@ -40,29 +41,28 @@ LOGIN_FAIL_TEXTS = ["密码错误", "账号或密码不正确", "登录名不存
 # ============================ 元素定位器 ============================
 # 每个键对应一组候选定位器，按顺序尝试，取第一个"可见"的元素。
 STEP_LOCATORS: dict[str, list[str]] = {
-    # ---- 登录页 ----
+    # ---- 登录页（位于跨域 iframe 内，经 frame_locator 使用）----
     "密码登录页签": [
-        "//*[normalize-space()='密码登录']",
-        'text="密码登录"',
-        "//a[contains(text(),'密码登录')]",
+        "a.password-login-tab-item",
+        "//a[normalize-space()='密码登录']",
     ],
     "账号输入框": [
         "#fm-login-id",
         "input[name='fm-login-id']",
-        "input[placeholder*='账号']",
+        "input[placeholder*='账号名']",
         "input[placeholder*='会员名']",
     ],
     "密码输入框": [
         "#fm-login-password",
         "input[name='fm-login-password']",
-        "input[placeholder*='密码']",
+        "input[placeholder*='登录密码']",
         "input[type='password']",
     ],
     "登录按钮": [
+        "button.fm-submit",
         "button:has-text('登录')",
         "#login-form button[type='submit']",
         ".fm-button",
-        "button[type='submit']",
     ],
     # ---- 千牛工作台导航 ----
     "左侧数据菜单": [
@@ -225,11 +225,14 @@ async def _run_step(
     return result
 
 
-async def _locate_first(page: Page, key: str) -> Locator | None:
-    """按 STEP_LOCATORS[key] 候选顺序，返回第一个可见元素；全部未命中返回 None。"""
+async def _locate_first(root, key: str) -> Locator | None:
+    """按 STEP_LOCATORS[key] 候选顺序，返回第一个可见元素；全部未命中返回 None。
+
+    root 可为 Page 或 FrameLocator（登录表单位于跨域 iframe 内，二者均支持 .locator()）。
+    """
     for sel in STEP_LOCATORS.get(key, []):
         try:
-            loc = page.locator(sel)
+            loc = root.locator(sel)
             n = await loc.count()
             for i in range(min(n, 20)):
                 cand = loc.nth(i)
@@ -291,9 +294,20 @@ async def _step_open_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> Non
 # ---- 第 2 步：登录 ----
 
 async def _step_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
-    # 默认可能是扫码登录页，先切到"密码登录"页签
+    # 登录表单在跨域 iframe 内（淘宝 havana 登录框），先等 iframe 出现
     try:
-        tab = await _locate_first(page, "密码登录页签")
+        await page.wait_for_selector(LOGIN_IFRAME, timeout=max(ctx.timeout_ms, 15000))
+    except PWTimeout:
+        raise StepFailed("找不到登录框（LOGIN_IFRAME），登录页可能已改版")
+    frame = page.frame_locator(LOGIN_IFRAME)
+    # 条件等待：账号输入框渲染完成（替代固定延时）
+    try:
+        await frame.locator("#fm-login-id").wait_for(state="visible", timeout=max(ctx.timeout_ms, 15000))
+    except PWTimeout:
+        raise StepFailed("登录框已出现，但账号输入框一直未渲染（可能网络慢或被风控拦截）")
+    # 默认已是密码登录视图，点击"密码登录"页签仅为兜底
+    try:
+        tab = await _locate_first(frame, "密码登录页签")
         if tab:
             await tab.click()
             await asyncio.sleep(0.5)
@@ -302,11 +316,11 @@ async def _step_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
     for _ in range(3):  # 最多尝试 3 轮（验证码打断会消耗轮次）
         _check_stop(ctx)
         for key, value in (("账号输入框", cfg.username), ("密码输入框", cfg.password)):
-            field = await _locate_first(page, key)
+            field = await _locate_first(frame, key)
             if field is None:
                 raise StepFailed(f"找不到{'账号' if '账号' in key else '密码'}输入框，登录页可能已改版")
             await field.fill(value)
-        login_btn = await _locate_first(page, "登录按钮")
+        login_btn = await _locate_first(frame, "登录按钮")
         if login_btn is None:
             raise StepFailed("找不到登录按钮，登录页可能已改版")
         await login_btn.click()

@@ -45,12 +45,15 @@ def describe_captcha(hit: str) -> str:
 
 
 async def detect_captcha(page: Page) -> str | None:
-    """返回验证码中文描述；无验证码返回 None。"""
-    try:
-        hit = await page.evaluate(DETECT_JS)
-    except Exception:
-        return None
-    return describe_captcha(hit) if hit else None
+    """检测验证码（扫描主框架与全部子框架——登录框/验证码位于跨域 iframe 内）。"""
+    for frame in page.frames:
+        try:
+            hit = await frame.evaluate(DETECT_JS)
+        except Exception:
+            continue
+        if hit:
+            return describe_captcha(hit)
+    return None
 
 
 async def wait_manual_captcha(

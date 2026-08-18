@@ -4,8 +4,15 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from playwright.async_api import async_playwright
 
-from app.steps import StepFailed, StepsContext, TaskStopped, _run_step
+from app.steps import (
+    StepFailed,
+    StepsContext,
+    TaskStopped,
+    _locate_first,
+    _run_step,
+)
 
 
 class FakeLog:
@@ -120,6 +127,25 @@ async def test_run_step_captcha_resolved_reruns_action():
     assert result == "ok2"
     assert calls[0] == 2
     assert any("重新执行" in m for _, m in log.lines)
+
+
+def test_locate_first_supports_frame_locator():
+    # 登录表单位于跨域 iframe（如淘宝 #alibaba-login-box）内，
+    # _locate_first 需支持传入 FrameLocator（root 鸭子类型：均有 .locator() 方法）
+    async def scenario():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.set_content(
+                '<iframe id="loginbox" srcdoc=\'<input id="fm-login-id">\'></iframe>'
+            )
+            frame = page.frame_locator("#loginbox")
+            el = await _locate_first(frame, "账号输入框")
+            assert el is not None
+            assert await el.get_attribute("id") == "fm-login-id"
+            await browser.close()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.asyncio
