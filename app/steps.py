@@ -278,6 +278,12 @@ async def _run_step(
             await asyncio.sleep(2)
     # 每步之后统一验证码检查
     hit = await detect_captcha(page)
+    if hit and hit == "无痕验证":
+        # baxia 安全检测弹窗优先自动关闭（关闭按钮在 iframe 内）；关不掉才等人工
+        if await _dismiss_baxia_iframe(page):
+            hit = await detect_captcha(page)
+            if not hit:
+                ctx.emit("info", "安全检测弹窗已自动关闭。")
     if hit:
         ctx.emit("warn", f"检测到{hit}，请人工处理…")
         ok = await wait_manual_captcha(page, ctx.stop_event, ctx.log, CAPTCHA_MAX_WAIT_SECONDS)
@@ -466,6 +472,8 @@ async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
             except Exception:
                 break
         await asyncio.sleep(0.5)
+    # 安全检测弹窗（baxia iframe，关闭按钮在 iframe 内部）单独处理
+    closed += await _dismiss_baxia_iframe(page)
     if closed:
         ctx.emit("info", f"已关闭 {closed} 个遮挡弹窗。")
     return closed
@@ -482,31 +490,56 @@ async def _click_nav(page: Page, ctx: StepsContext, key: str, name: str) -> None
     await _human_click(el)
 
 
-async def _step_click_data(page: Page, ctx: StepsContext) -> None:
-    """第 4 步：点击左侧菜单「数据」并等待数据中心（xstore iframe）加载。"""
+async def _step_click_data(page: Page, ctx: StepsContext) -> Page:
+    """第 4 步：点击左侧菜单「数据」——在新标签页打开生意参谋（sycm.taobao.com），返回新页面。
+
+    真实行为（已实证）：侧边栏『数据』是 target=_blank 的链接，点击后数据中心
+    在新标签页打开，后续『市场/类目洞察/价格分析』都在新页面中操作。
+    """
     await _dismiss_popups(page, ctx)
-    el, source = await _locate_first_in_frames(page, "左侧数据菜单")
+    el, _source = await _locate_first_in_frames(page, "左侧数据菜单")
     if el is None:
         raise StepFailed("找不到可点击的元素『数据』，页面可能已改版（请检查 steps.py 定位器）")
-    await _human_click(el)
-    await _wait_xstore_visible(page, ctx)
+    try:
+        async with page.context.expect_page(timeout=max(ctx.timeout_ms, 20000)) as pinfo:
+            await _human_click(el)
+        new_page = await pinfo.value
+    except Exception:
+        # 未捕获到新标签页：可能页面改版为页内导航，或弹窗被拦截
+        ctx.emit("warn", "点击『数据』后未检测到新标签页，尝试继续在当前页面操作。")
+        return page
+    try:
+        await new_page.wait_for_load_state("domcontentloaded", timeout=max(ctx.timeout_ms, 20000))
+    except Exception:
+        pass
+    await asyncio.sleep(3)
+    ctx.emit("success", f"已在新标签页打开数据中心：{new_page.url}")
+    await _dismiss_popups(new_page, ctx)
+    return new_page
 
 
-async def _wait_xstore_visible(page: Page, ctx: StepsContext) -> bool:
-    """等待数据中心 iframe 变为可见（『市场』等页签在其中，加载可能较慢）。"""
-    deadline = asyncio.get_event_loop().time() + max(ctx.timeout_ms / 1000, 30)
-    while asyncio.get_event_loop().time() < deadline:
-        _check_stop(ctx)
-        try:
-            iframe = page.locator(XSTORE_IFRAME)
-            if await iframe.count() > 0 and await iframe.nth(0).is_visible():
-                ctx.emit("success", "数据模块已加载。")
-                return True
-        except Exception:
-            pass
-        await asyncio.sleep(1)
-    ctx.emit("warn", "数据模块未在预期时间内加载完成，继续尝试后续步骤（若失败请检查第 4 步）。")
-    return False
+async def _dismiss_baxia_iframe(page: Page) -> int:
+    """尝试关闭 baxia 安全检测弹窗（关闭按钮在 iframe 内部），返回关闭数量。"""
+    try:
+        bf = page.frame_locator("#baxia-dialog-content")
+        for sel in STEP_LOCATORS["弹窗关闭按钮"] + [
+            "button:has-text('关闭')",
+            "//*[normalize-space()='知道了']",
+            "a[class*='close']",
+            "[class*='close-btn']",
+        ]:
+            try:
+                loc = bf.locator(sel)
+                n = await loc.count()
+                for i in range(min(n, 3)):
+                    if await loc.nth(i).is_visible():
+                        await loc.nth(i).click()
+                        return 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return 0
 
 
 # ============================ 内置步骤 1-9 ============================
@@ -521,7 +554,7 @@ async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> Flo
     else:
         await _run_step(ctx, 2, "填写账号密码并登录", lambda: _step_login(page, cfg, ctx), page)
         await _run_step(ctx, 3, "等待登录成功跳转工作台", lambda: _step_wait_login(page, ctx), page)
-    await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _step_click_data(page, ctx), page)
+    page = await _run_step(ctx, 4, "点击左侧菜单「数据」（新标签页打开数据中心）", lambda: _step_click_data(page, ctx), page) or page
     await _run_step(ctx, 5, "点击上方页签「市场」", lambda: _click_nav(page, ctx, "上方市场页签", "市场"), page)
     await _run_step(ctx, 6, "点击左侧菜单「类目洞察」", lambda: _click_nav(page, ctx, "左侧类目洞察菜单", "类目洞察"), page)
     await _run_step(ctx, 7, "点击「价格分析」", lambda: _click_nav(page, ctx, "价格分析页签", "价格分析"), page)

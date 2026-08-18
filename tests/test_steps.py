@@ -11,8 +11,10 @@ from app.steps import (
     StepsContext,
     TaskStopped,
     _click_nav,
+    _dismiss_baxia_iframe,
     _locate_first,
     _run_step,
+    _step_click_data,
     _wait_popup,
 )
 
@@ -249,4 +251,42 @@ async def test_wait_popup_finds_dialog_in_iframe():
         popup = await _wait_popup(page, ctx)
         assert popup is not None
         assert "弹窗" in (await popup.inner_text())
+        await browser.close()
+
+
+# ---------- 新标签页切换与 baxia 安全弹窗（离线 fixture 验证） ----------
+
+@pytest.mark.asyncio
+async def test_step_click_data_opens_new_page():
+    """『数据』菜单是 target=_blank 链接：点击后应切换到新标签页并返回新页面。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content('<a href="about:blank#sycm" target="_blank"><span>数据</span></a>')
+        ctx, _log = make_ctx()
+        new_page = await _step_click_data(page, ctx)
+        assert new_page is not page
+        assert len(page.context.pages) == 2
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_dismiss_baxia_iframe_closes():
+    """baxia 安全检测弹窗的关闭按钮在 iframe 内部：应能自动关闭。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content('<iframe id="baxia-dialog-content" srcdoc=\'<button class="close-btn">关闭</button>\'></iframe>')
+        await page.frame_locator("#baxia-dialog-content").locator(".close-btn").evaluate(
+            "el => el.addEventListener('click', () => { el.dataset.hit = '1'; })"
+        )
+        assert await _dismiss_baxia_iframe(page) == 1
+        hit = await page.frame_locator("#baxia-dialog-content").locator(".close-btn").evaluate(
+            "el => el.dataset.hit"
+        )
+        assert hit == "1"
         await browser.close()
