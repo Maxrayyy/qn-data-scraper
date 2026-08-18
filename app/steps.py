@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Locator, Page, TimeoutError as PWTimeout
 
@@ -33,8 +34,9 @@ from .scraper import (
 CATEGORY_NAME = "猫笼子/猫别墅"        # ★ 要分析的类目名
 MAX_RETRIES = 2                          # 每步失败自动重试次数
 CAPTCHA_MAX_WAIT_SECONDS = 600           # 验证码最长人工等待时间（秒）
+SMS_VERIFY_MAX_WAIT_SECONDS = 300        # 短信验证身份最长人工等待时间（秒）
 LOGIN_IFRAME = "#alibaba-login-box"   # ★ 登录表单所在 iframe（淘宝 havana 登录框，改版时检查）
-LOGIN_SUCCESS_DOMAINS = ["qn.taobao.com"]      # 登录成功判据一：URL 域名
+LOGIN_SUCCESS_DOMAINS = ["qn.taobao.com"]      # 登录成功判据一：URL 域名（netloc 匹配）
 LOGIN_SUCCESS_TEXTS = ["工作台"]               # 登录成功判据二：页面出现标志文字
 LOGIN_FAIL_TEXTS = ["密码错误", "账号或密码不正确", "登录名不存在", "验证失败"]
 
@@ -156,6 +158,66 @@ class FlowResult:
 
 
 # ============================ 步骤框架 ============================
+
+def _is_login_success_url(url: str) -> bool:
+    """登录成功判据一：URL 的域名（netloc）包含目标域名。
+
+    只匹配 netloc，不匹配查询参数——登录页 URL 的 redirect_url 参数里
+    可能含有 qn.taobao.com，子串匹配会造成"未登录却判定成功"的假阳性。
+    """
+    netloc = urlparse(url).netloc.lower()
+    return any(d in netloc for d in LOGIN_SUCCESS_DOMAINS)
+
+
+async def _detect_sms_verify(page: Page) -> bool:
+    """检测手机短信验证身份界面（havana identity_verify：验证码输入框/获取验证码按钮）。"""
+    for frame in page.frames:
+        try:
+            loc = frame.locator("#J_Checkcode, #J_GetCode, input[placeholder='6位数字']")
+            n = await loc.count()
+            for i in range(min(n, 3)):
+                if await loc.nth(i).is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+async def _wait_sms_verify(page: Page, ctx: StepsContext) -> bool:
+    """短信验证身份：自动点击『点击获取验证码』，等待人工输入 6 位数字验证码并确认。
+
+    返回 True=验证界面已结束（成功跳转或退回登录页，由第 3 步判定），False=超时或被停止。
+    """
+    ctx.emit(
+        "warn",
+        "检测到手机短信验证身份：已自动点击『点击获取验证码』，"
+        "请在浏览器窗口输入收到的 6 位数字验证码并点『确定』，工具等待中…",
+    )
+    # 自动点击"点击获取验证码"按钮
+    for frame in page.frames:
+        try:
+            btn = frame.locator("#J_GetCode")
+            if await btn.count() > 0 and await btn.nth(0).is_visible():
+                await btn.nth(0).click()
+                break
+        except Exception:
+            continue
+    waited = 0
+    while waited < SMS_VERIFY_MAX_WAIT_SECONDS:
+        _check_stop(ctx)
+        if _is_login_success_url(page.url):
+            ctx.emit("success", "短信验证通过，继续登录流程。")
+            return True
+        if not await _detect_sms_verify(page):
+            # 验证界面消失：可能已完成或退回登录页，交给第 3 步判定
+            ctx.emit("info", "验证码输入界面已关闭，继续检查登录状态…")
+            return True
+        await asyncio.sleep(1)
+        waited += 1
+        if waited % 15 == 0:
+            ctx.emit("info", f"仍在等待短信验证输入…（已等待 {waited} 秒，最长 {SMS_VERIFY_MAX_WAIT_SECONDS} 秒）")
+    return False
+
 
 def _check_stop(ctx: StepsContext) -> None:
     if ctx.stop_event.is_set():
@@ -326,15 +388,24 @@ async def _step_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
         await login_btn.click()
         await asyncio.sleep(2)
         hit = await detect_captcha(page)
-        if not hit:
-            return  # 交给第 3 步验证是否真正登录成功
-        ctx.emit("warn", f"登录时出现{hit}！请在浏览器窗口中手动完成验证…")
-        ok = await wait_manual_captcha(page, ctx.stop_event, ctx.log, CAPTCHA_MAX_WAIT_SECONDS)
-        if not ok:
-            if ctx.stop_event.is_set():
-                raise TaskStopped()
-            raise StepFailed("验证码等待超时，登录失败")
-        # 验证通过后循环重填重登
+        if hit:
+            ctx.emit("warn", f"登录时出现{hit}！请在浏览器窗口中手动完成验证…")
+            ok = await wait_manual_captcha(page, ctx.stop_event, ctx.log, CAPTCHA_MAX_WAIT_SECONDS)
+            if not ok:
+                if ctx.stop_event.is_set():
+                    raise TaskStopped()
+                raise StepFailed("验证码等待超时，登录失败")
+            # 验证通过后循环重填重登
+            continue
+        # 手机短信验证身份步骤（密码登录后淘宝要求验证手机短信）
+        if await _detect_sms_verify(page):
+            ok = await _wait_sms_verify(page, ctx)
+            if not ok:
+                if ctx.stop_event.is_set():
+                    raise TaskStopped()
+                raise StepFailed("短信验证未完成（等待超时），登录失败")
+            return  # 验证界面已结束，交给第 3 步判定登录结果
+        return  # 交给第 3 步验证是否真正登录成功
     raise StepFailed("多次尝试后仍未完成登录（可能验证码未处理或页面改版）")
 
 
@@ -344,7 +415,7 @@ async def _step_wait_login(page: Page, ctx: StepsContext) -> None:
     deadline = asyncio.get_event_loop().time() + max(ctx.timeout_ms / 1000 * 3, 90)
     while asyncio.get_event_loop().time() < deadline:
         _check_stop(ctx)
-        if any(d in page.url for d in LOGIN_SUCCESS_DOMAINS):
+        if _is_login_success_url(page.url):
             ctx.emit("success", "登录成功，已跳转到千牛工作台。")
             return
         try:

@@ -164,3 +164,18 @@ async def test_run_step_captcha_resolved_rerun_still_fails():
             await _run_step(ctx, 7, "验证码重跑步骤", always_fail, page)
     assert calls[0] == 2
     assert any("重新执行" in m for _, m in log.lines)
+
+
+# ---------- 登录成功判据（防假阳性） ----------
+
+def test_is_login_success_url_real_workbench():
+    from app.steps import _is_login_success_url
+    assert _is_login_success_url("https://qn.taobao.com/home.htm") is True
+
+
+def test_is_login_success_url_login_page_false_positive():
+    # 登录页 URL 的 redirect_url 查询参数里含 qn.taobao.com，但域名是 loginmyseller —— 不得判定成功
+    from app.steps import _is_login_success_url
+    url = ("https://loginmyseller.taobao.com/?from=taobaoindex&f=top&style=&sub=true"
+           "&redirect_url=https%3A%2F%2Fqn.taobao.com%2Fhome.htm%2Fstarb%2Fnebula")
+    assert _is_login_success_url(url) is False
