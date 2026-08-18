@@ -1,6 +1,11 @@
 from playwright.sync_api import sync_playwright
 
-from app.scraper import EXTRACT_JS, extract_product_id, normalize_image_url
+from app.scraper import (
+    EXTRACT_JS,
+    extract_product_id,
+    normalize_image_url,
+    resolve_product_id,
+)
 
 
 # ---------- 纯函数 ----------
@@ -15,6 +20,31 @@ def test_extract_product_id_path():
 
 def test_extract_product_id_none():
     assert extract_product_id("https://example.com/foo/bar") == ""
+
+
+def test_resolve_product_id_fallback_to_image():
+    # href 无 id，图片 URL 有 id → 回退取图片 id
+    assert (
+        resolve_product_id(
+            "https://item.taobao.com/item.htm", "https://img.alicdn.com/abc?id=777777"
+        )
+        == "777777"
+    )
+
+
+def test_resolve_product_id_both_missing():
+    assert resolve_product_id("https://example.com/x", "https://img.alicdn.com/y.jpg") == ""
+
+
+def test_resolve_product_id_href_wins():
+    # href 有 id 时优先于图片 URL
+    assert (
+        resolve_product_id(
+            "https://item.taobao.com/item.htm?id=555555",
+            "https://img.alicdn.com/z.jpg?id=999999",
+        )
+        == "555555"
+    )
 
 
 def test_normalize_image_url():

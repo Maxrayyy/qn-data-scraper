@@ -20,7 +20,8 @@ DETECT_JS = """
                 '[id*="captcha"]', '[class*="captcha"]', '.captcha-container'];
   for (const sel of sels) {
     const el = document.querySelector(sel);
-    if (el && el.offsetParent !== null) return sel;   // 只认可见元素
+    // offsetParent 对 position:fixed 元素恒为 null，需用 boundingRect 兜底
+    if (el && (el.offsetParent !== null || el.getBoundingClientRect().width > 0)) return sel;
   }
   const frames = [...document.querySelectorAll('iframe')];
   for (const f of frames) {
@@ -58,15 +59,24 @@ async def wait_manual_captcha(
     log: Callable[[str, str], None],
     max_wait_seconds: int = 600,
 ) -> bool:
-    """暂停等待用户手动完成验证码。返回 True=已解除，False=超时或被停止。"""
+    """暂停等待用户手动完成验证码。返回 True=已解除，False=超时或被停止。
+
+    单次 evaluate 异常会被 detect_captcha 吞掉并返回 None——若据此立即判"已通过"
+    会误跳过验证码。因此要求连续两次干净检测（clean_streak >= 2）才判解除。
+    """
     waited = 0
+    clean_streak = 0
     log("warn", "遇到验证码，请手动处理：请在浏览器窗口中完成验证，完成后工具自动继续…")
     while waited < max_wait_seconds:
         if stop_event.is_set():
             return False
         if not await detect_captcha(page):
-            log("success", f"验证码已通过（人工处理耗时约 {waited} 秒），继续执行。")
-            return True
+            clean_streak += 1
+            if clean_streak >= 2:
+                log("success", f"验证码已通过（人工处理耗时约 {waited} 秒），继续执行。")
+                return True
+        else:
+            clean_streak = 0
         await asyncio.sleep(1)
         waited += 1
         if waited % 10 == 0:

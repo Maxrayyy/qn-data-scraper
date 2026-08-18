@@ -16,6 +16,24 @@ IMAGE_HEIGHT_PX = 60  # 嵌入图片统一缩略高度（像素）
 ROW_HEIGHT = 64       # 数据行高
 
 
+def dedupe_rows(rows: list[tuple[ProductItem, Path | None]]) -> list[tuple[ProductItem, Path | None]]:
+    """按 product_id 去重（保留首次出现）；product_id 为空时按 (商品名, 支付单量, 件单价) 三元组去重。"""
+    seen: set[tuple] = set()
+    out: list[tuple[ProductItem, Path | None]] = []
+    for row in rows:
+        item = row[0]
+        key = (
+            (item.product_id,)
+            if item.product_id
+            else (item.name, item.orders, item.price)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
 def build_output_path(export_dir: str | Path, now: datetime | None = None) -> Path:
     """文件名冲突时自动追加时间戳，绝不覆盖旧文件。now 参数仅供测试注入。"""
     now = now or datetime.now()
@@ -33,6 +51,7 @@ def export_to_excel(
 
     多条"商品发现"的数据直接依次追加到同一个工作簿。
     """
+    rows = dedupe_rows(rows)  # 验证码重跑/关弹窗失败可能重复抓取，导出前先去重
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
@@ -48,12 +67,16 @@ def export_to_excel(
     # 数据行
     for i, (item, img_path) in enumerate(rows, start=2):
         ws.row_dimensions[i].height = ROW_HEIGHT
-        # 商品图片：嵌入真实图片（缩略到统一高度，保持宽高比）
+        # 商品图片：嵌入真实图片（缩略到统一高度，保持宽高比）。
+        # CDN 返回 200 的 HTML 错误页被存成 .jpg 时 PIL 打不开 → 本行降级为仅保留文字。
         if img_path and img_path.exists():
-            img = XLImage(str(img_path))
-            img.width = IMAGE_HEIGHT_PX * (img.width / img.height)
-            img.height = IMAGE_HEIGHT_PX
-            ws.add_image(img, f"A{i}")
+            try:
+                img = XLImage(str(img_path))
+                img.width = IMAGE_HEIGHT_PX * (img.width / img.height)
+                img.height = IMAGE_HEIGHT_PX
+                ws.add_image(img, f"A{i}")
+            except Exception:
+                pass  # 单张坏图不中断整个导出
         # 商品名：带超链接
         name_cell = ws.cell(row=i, column=2, value=item.name or "(无名称)")
         if item.item_url:

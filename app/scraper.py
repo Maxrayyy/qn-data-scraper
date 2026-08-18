@@ -34,6 +34,11 @@ def extract_product_id(url: str) -> str:
     return ""
 
 
+def resolve_product_id(item_url: str, image_url: str) -> str:
+    """优先从商品链接提取商品id；失败回退从图片 URL 提取；仍失败返回空串。"""
+    return extract_product_id(item_url) or extract_product_id(image_url)
+
+
 def normalize_image_url(url: str) -> str:
     if not url:
         return ""

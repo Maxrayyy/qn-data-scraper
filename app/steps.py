@@ -25,8 +25,8 @@ from .config import AppConfig
 from .scraper import (
     EXTRACT_JS,
     ProductItem,
-    extract_product_id,
     normalize_image_url,
+    resolve_product_id,
 )
 
 # ============================ 可调参数 ============================
@@ -503,10 +503,14 @@ async def _extract_popup_items(
             image_url=normalize_image_url(d.get("img", "")),
             name=(d.get("name", "") or "").strip(),
             item_url=d.get("href", ""),
-            product_id=extract_product_id(d.get("href", "")),
+            product_id=resolve_product_id(
+                d.get("href", ""), normalize_image_url(d.get("img", ""))
+            ),
             orders=d.get("orders", ""),
             price=d.get("price", ""),
         )
+        if not item.product_id:
+            ctx.emit("warn", f"商品『{item.name[:20]}』未解析到商品id，已留空。")
         img_path = None
         if item.image_url:
             img_path = await _download_image(ctx, item.image_url)
