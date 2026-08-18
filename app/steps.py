@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -147,6 +148,7 @@ class StepsContext:
     temp_dir: Path                   # 图片临时目录
     max_retries: int = MAX_RETRIES
     rows_sink: list | None = None    # 抓到的数据实时追加，供中途停止时尽力导出
+    human_pace: bool = True          # 模拟人工操作节奏（随机停顿/悬停，降低风控概率）
 
     def emit(self, level: str, msg: str) -> None:
         self.log(level, msg)
@@ -283,6 +285,9 @@ async def _run_step(
                 last_err = e
     if not succeeded:
         raise StepFailed(f"第 {step_no} 步『{name}』失败：{last_err}")
+    # 模拟人工节奏：步骤之间随机停顿，避免机械化的连续操作
+    if ctx.human_pace:
+        await asyncio.sleep(random.uniform(0.8, 2.5))
     ctx.emit("success", f"第 {step_no} 步『{name}』完成。")
     return result
 
@@ -349,12 +354,33 @@ async def _locate_selector_with_hits(page: Page, key: str) -> str | None:
     return None
 
 
+async def _human_click(el: Locator, min_delay: float = 0.2) -> None:
+    """模拟人工点击：先滚动到可视区并悬停，随机停顿后点击。"""
+    try:
+        await el.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        await el.hover()
+        await asyncio.sleep(random.uniform(min_delay, min_delay + 0.5))
+    except Exception:
+        pass
+    await el.click()
+
+
+async def _human_type(el: Locator, text: str) -> None:
+    """模拟人工打字：清空后逐字符输入，字符间随机间隔。"""
+    await el.fill("")
+    await el.click()
+    await el.press_sequentially(text, delay=random.randint(40, 110))
+
+
 async def _click_first(page: Page, key: str, name: str) -> None:
     """点击候选定位器中第一个可见元素；找不到则抛 StepFailed。"""
     el = await _locate_first(page, key)
     if el is None:
         raise StepFailed(f"找不到可点击的元素『{name}』，页面可能已改版（请检查 steps.py 定位器）")
-    await el.click()
+    await _human_click(el)
 
 
 async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
@@ -419,8 +445,12 @@ async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> Flo
     """主流程：依次执行 9 个内置步骤。修改点击顺序改这里。"""
     result = FlowResult()
     await _run_step(ctx, 1, "打开登录页", lambda: _step_open_login(page, cfg, ctx), page)
-    await _run_step(ctx, 2, "填写账号密码并登录", lambda: _step_login(page, cfg, ctx), page)
-    await _run_step(ctx, 3, "等待登录成功跳转工作台", lambda: _step_wait_login(page, ctx), page)
+    if _is_login_success_url(page.url):
+        # 持久化浏览器会话已登录：跳过登录步骤（像正常浏览器一样复用登录态）
+        ctx.emit("success", "检测到浏览器会话已登录（持久化会话生效），跳过登录步骤。")
+    else:
+        await _run_step(ctx, 2, "填写账号密码并登录", lambda: _step_login(page, cfg, ctx), page)
+        await _run_step(ctx, 3, "等待登录成功跳转工作台", lambda: _step_wait_login(page, ctx), page)
     await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _click_nav(page, ctx, "左侧数据菜单", "数据"), page)
     await _run_step(ctx, 5, "点击上方页签「市场」", lambda: _click_nav(page, ctx, "上方市场页签", "市场"), page)
     await _run_step(ctx, 6, "点击左侧菜单「类目洞察」", lambda: _click_nav(page, ctx, "左侧类目洞察菜单", "类目洞察"), page)
@@ -436,6 +466,11 @@ async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> Flo
 
 async def _step_open_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
     await page.goto(cfg.url, wait_until="domcontentloaded", timeout=max(ctx.timeout_ms, 30000))
+    # 持久化会话下登录页可能自动重定向到工作台，等待重定向稳定（最多 10 秒）
+    for _ in range(20):
+        if _is_login_success_url(page.url):
+            break
+        await asyncio.sleep(0.5)
     await asyncio.sleep(2)
 
 
@@ -467,13 +502,13 @@ async def _step_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
             field = await _locate_first(frame, key)
             if field is None:
                 raise StepFailed(f"找不到{'账号' if '账号' in key else '密码'}输入框，登录页可能已改版")
-            await field.fill(value)
+            await _human_type(field, value)
         # 勾选"记住密码"（可让淘宝信任本设备，减少后续短信验证），尽力而为
         await _check_remember_password(frame)
         login_btn = await _locate_first(frame, "登录按钮")
         if login_btn is None:
             raise StepFailed("找不到登录按钮，登录页可能已改版")
-        await login_btn.click()
+        await _human_click(login_btn, min_delay=0.4)
         await asyncio.sleep(2)
         hit = await detect_captcha(page)
         if hit:
@@ -584,8 +619,7 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
             _check_stop(ctx)
             btn = page.locator(btn_sel).nth(processed)
             try:
-                await btn.scroll_into_view_if_needed()
-                await btn.click()
+                await _human_click(btn, min_delay=0.3)
                 clicked = True
                 break
             except Exception:
@@ -606,6 +640,9 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
             ctx.rows_sink.extend(items)
         await _close_popup(page, popup, ctx)
         processed += 1
+        # 模拟人工节奏：每条明细之间随机停顿
+        if ctx.human_pace:
+            await asyncio.sleep(random.uniform(1.0, 2.5))
     ctx.emit("success", f"分析明细遍历完成，累计抓取 {len(rows)} 条商品数据。")
     return rows
 

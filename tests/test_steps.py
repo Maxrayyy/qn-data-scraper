@@ -35,6 +35,7 @@ def make_ctx(max_retries=1):
         context=None,          # 测试不下载图片
         temp_dir=Path("/tmp"),
         max_retries=max_retries,
+        human_pace=False,      # 测试关闭随机停顿，保持快速且确定性
     )
     return ctx, log
 

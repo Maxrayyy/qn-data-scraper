@@ -54,3 +54,21 @@ def test_export_partial_rows_empty_no_file(tmp_path):
     n = export_partial_rows([], str(tmp_path), _collect_log(entries))
     assert n == 0
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------- 持久化浏览器会话（像正常浏览器一样记住登录状态） ----------
+
+def test_persistent_context_smoke(tmp_path):
+    """launch_persistent_context 是产品依赖的启动方式，验证其可用性。"""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=str(tmp_path / "prof"), headless=True
+        )
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.set_content("<div>ok</div>")
+            assert "ok" in page.inner_text("body")
+        finally:
+            ctx.close()

@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 
 import psutil
-from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Playwright, async_playwright
 from PySide6.QtCore import QObject, QThread, Signal
 
 from .config import AppConfig
@@ -31,6 +31,20 @@ class WorkerSignals(QObject):
     finished = Signal(bool, str)    # (是否成功, 摘要/错误信息)
 
 
+def browser_profile_dir() -> Path:
+    """持久化浏览器会话目录：像正常浏览器一样记住登录状态，避免每次全新登录。
+
+    Windows: %APPDATA%\\qn-data-scraper\\browser-profile（不可写回退 exe 目录）
+    其他平台（开发环境）: ~/.qn-data-scraper/browser-profile
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home())
+        if not os.access(base, os.W_OK):
+            base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        return base / "qn-data-scraper" / "browser-profile"
+    return Path.home() / ".qn-data-scraper" / "browser-profile"
+
+
 class ScrapeWorker(QThread):
     def __init__(self, cfg: AppConfig, parent=None):
         super().__init__(parent)
@@ -39,7 +53,6 @@ class ScrapeWorker(QThread):
         self._stop_event = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._temp_dir: Path | None = None
 
@@ -78,15 +91,24 @@ class ScrapeWorker(QThread):
             sink: list = []  # 中途停止时尽力导出的已抓数据
             self._temp_dir = Path(tempfile.mkdtemp(prefix="qn-scraper-"))
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=False,  # 有头模式：用户可见并可手动处理验证码
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            self._context = await self._browser.new_context(
-                viewport={"width": 1440, "height": 900},
-                locale="zh-CN",
-            )
-            page = await self._context.new_page()
+            # 持久化浏览器会话：登录状态像正常浏览器一样被记住，
+            # 避免每次运行都全新登录（减少触发平台风控的概率）
+            profile = browser_profile_dir()
+            try:
+                self._context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile),
+                    headless=False,  # 有头模式：用户可见并可手动处理验证码
+                    viewport={"width": 1440, "height": 900},
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"启动持久化浏览器会话失败（会话目录：{profile}）。"
+                    "如提示进程占用，请确认没有其他工具实例在运行后重试。原始错误：{e}"
+                ) from e
+            page = self._context.pages[0] if self._context.pages else await self._context.new_page()
             page.set_default_timeout(self._cfg.page_timeout * 1000)
 
             ctx = StepsContext(
@@ -123,10 +145,13 @@ class ScrapeWorker(QThread):
             await self._cleanup()
 
     async def _close_browser(self) -> None:
-        """在事件循环线程内关闭浏览器（触发在途操作报错 → 流程退出）。"""
+        """在事件循环线程内关闭浏览器（触发在途操作报错 → 流程退出）。
+
+        持久化会话模式下 context 即浏览器：关闭 context 会关闭整个浏览器进程。
+        """
         try:
-            if self._browser:
-                await self._browser.close()
+            if self._context:
+                await self._context.close()
         except Exception:
             pass
 
@@ -138,12 +163,6 @@ class ScrapeWorker(QThread):
             except Exception:
                 pass
         self._context = None
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception:
-                pass
-        self._browser = None
         if self._playwright:
             try:
                 await self._playwright.stop()
