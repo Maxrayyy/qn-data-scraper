@@ -83,12 +83,12 @@ def load_config() -> AppConfig | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        return AppConfig(
+            url=data.get("url") or DEFAULT_URL,
+            username=data.get("username", ""),
+            password=decrypt_password(data.get("password", "")),
+            export_dir=data.get("export_dir", ""),
+            page_timeout=int(data.get("page_timeout", 30)),
+        )
+    except (json.JSONDecodeError, OSError, ValueError, AttributeError):
         return None  # 配置文件损坏 → 视为无配置
-    return AppConfig(
-        url=data.get("url") or DEFAULT_URL,
-        username=data.get("username", ""),
-        password=decrypt_password(data.get("password", "")),
-        export_dir=data.get("export_dir", ""),
-        page_timeout=int(data.get("page_timeout", 30)),
-    )

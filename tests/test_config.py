@@ -22,7 +22,8 @@ def test_encrypt_roundtrip():
     assert decrypt_password(cipher) == plain
 
 
-def test_encrypt_not_plaintext_in_json():
+def test_encrypt_not_plaintext_in_json(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.config_path", lambda: tmp_path / "config.json")
     cfg = AppConfig(username="u", password="secret123", export_dir="/tmp")
     path = save_config(cfg)
     raw = path.read_text(encoding="utf-8")
