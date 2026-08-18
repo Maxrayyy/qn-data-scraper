@@ -144,6 +144,7 @@ class StepsContext:
     context: BrowserContext          # 用于带登录会话下载商品图片
     temp_dir: Path                   # 图片临时目录
     max_retries: int = MAX_RETRIES
+    rows_sink: list | None = None    # 抓到的数据实时追加，供中途停止时尽力导出
 
     def emit(self, level: str, msg: str) -> None:
         self.log(level, msg)
@@ -427,6 +428,8 @@ async def _step_collect(page: Page, ctx: StepsContext) -> list[tuple[ProductItem
         items = await _extract_popup_items(page, popup, ctx)
         ctx.emit("success", f"第 {processed + 1} 条『商品发现』抓取到 {len(items)} 条商品数据。")
         rows.extend(items)
+        if ctx.rows_sink is not None:
+            ctx.rows_sink.extend(items)
         await _close_popup(page, popup, ctx)
         processed += 1
     ctx.emit("success", f"分析明细遍历完成，累计抓取 {len(rows)} 条商品数据。")

@@ -53,7 +53,7 @@ class ScrapeWorker(QThread):
         self._stop_event.set()
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(self._close_browser)
+            asyncio.run_coroutine_threadsafe(self._close_browser(), loop)
 
     def _log(self, level: str, msg: str) -> None:
         self._signals.log.emit(level, msg)
@@ -75,6 +75,7 @@ class ScrapeWorker(QThread):
     async def _run_async(self) -> None:
         try:
             self._log("info", "正在启动内置浏览器（首次启动稍慢，请稍候）…")
+            sink: list = []  # 中途停止时尽力导出的已抓数据
             self._temp_dir = Path(tempfile.mkdtemp(prefix="qn-scraper-"))
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
@@ -94,6 +95,7 @@ class ScrapeWorker(QThread):
                 timeout_ms=self._cfg.page_timeout * 1000,
                 context=self._context,
                 temp_dir=self._temp_dir,
+                rows_sink=sink,
             )
             result = await run_builtin_flow(page, self._cfg, ctx)
 
@@ -107,7 +109,9 @@ class ScrapeWorker(QThread):
                 self._signals.finished.emit(False, "任务结束，但未抓到任何数据。请检查页面状态或联系开发者调整定位器。")
         except TaskStopped:
             self._log("warn", "任务已停止。")
-            self._signals.finished.emit(False, "任务已停止。")
+            n = export_partial_rows(sink, self._cfg.export_dir, self._log)
+            msg = "任务已停止。" + (f"已导出停止前抓取的 {n} 条数据。" if n else "")
+            self._signals.finished.emit(False, msg)
         except Exception as e:
             if self._stop_event.is_set():
                 self._log("warn", "任务已停止。")
@@ -195,3 +199,17 @@ def kill_orphan_browsers(app_dir: Path) -> int:
     except Exception:
         pass
     return killed
+
+
+def export_partial_rows(sink: list, export_dir: str, log) -> int:
+    """停止时尽力导出已抓数据。返回导出条数；空则 0 且不生成文件。"""
+    if not sink:
+        return 0
+    try:
+        out = build_output_path(export_dir)
+        export_to_excel(sink, out)
+        log("success", f"已导出停止前抓取的 {len(sink)} 条数据 → {out}")
+        return len(sink)
+    except Exception as e:
+        log("warn", f"停止时导出失败：{e}")
+        return 0
