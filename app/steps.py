@@ -523,8 +523,10 @@ async def _dismiss_baxia_dialog(page: Page) -> int:
     """关闭 baxia 安全提示弹窗（主文档 div.baxia-dialog + 遮罩，关闭按钮为右上角 X）。
 
     实证：该弹窗渲染在主文档中（div.baxia-dialog-mask 全屏遮罩 + div.baxia-dialog，
-    弹窗文本为 "X"），并非在 iframe 内。返回关闭数量。
+    弹窗文本为 "X"）。遮罩会拦截 Playwright 的命中检测，因此先按选择器点 X，
+    失败则用鼠标坐标直接点击 X 位置（与真人操作一致）。返回关闭数量。
     """
+    # 1) 选择器方式
     for sel in [
         "//div[contains(@class,'baxia-dialog')]//*[normalize-space()='X']",
         "//div[contains(@class,'baxia-dialog')]//*[normalize-space()='×']",
@@ -540,6 +542,39 @@ async def _dismiss_baxia_dialog(page: Page) -> int:
                     return 1
         except Exception:
             continue
+    # 2) 鼠标坐标方式：定位 X 元素中心（或弹窗右上角）后直接点击
+    try:
+        point = await page.evaluate(
+            """() => {
+                const d = document.querySelector('.baxia-dialog');
+                if (!d) return null;
+                const nodes = [...d.querySelectorAll('*')];
+                for (const n of nodes) {
+                    const t = (n.textContent || '').trim();
+                    if (['X', '×', '✕'].includes(t) && n.children.length <= 2) {
+                        const r = n.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+                        }
+                    }
+                }
+                const r = d.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) return null;
+                return {x: r.x + r.width - 18, y: r.y + 22};  // 回退：右上角
+            }"""
+        )
+        if point:
+            await page.mouse.click(point["x"], point["y"])
+            await asyncio.sleep(0.5)
+            gone = await page.evaluate(
+                """() => {
+                    const m = document.querySelector('.baxia-dialog-mask');
+                    return !m || getComputedStyle(m).display === 'none';
+                }"""
+            )
+            return 1 if gone else 0
+    except Exception:
+        pass
     return 0
 
 

@@ -309,3 +309,25 @@ async def test_dismiss_baxia_dialog_main_doc_x():
         hit = await page.locator("#x").evaluate("el => el.dataset.hit")
         assert hit == "1"
         await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_dismiss_baxia_dialog_by_coordinates():
+    """无X选择器命中时，应通过鼠标坐标点击弹窗右上角关闭（点击后遮罩消失）。"""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(
+            '<div class="baxia-dialog-mask" style="position:fixed;inset:0"></div>'
+            '<div class="baxia-dialog" style="position:fixed;top:200px;left:500px;width:300px;height:150px;background:#fff">X</div>'
+        )
+        # X 文本直接位于弹窗容器内（无子元素）→ 选择器路径必然落空，只能走坐标点击
+        await page.locator(".baxia-dialog").evaluate(
+            "el => el.addEventListener('click', () => { document.querySelector('.baxia-dialog-mask').remove(); })"
+        )
+        # 坐标点击路径：mask 存在时 locator.click 会被拦截，此处验证坐标点击有效
+        assert await _dismiss_baxia_dialog(page) == 1
+        assert await page.locator(".baxia-dialog-mask").count() == 0
+        await browser.close()
