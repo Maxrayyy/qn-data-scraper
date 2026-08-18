@@ -99,3 +99,42 @@ async def test_run_step_captcha_pause_then_continue():
     det.assert_awaited()
     wait.assert_awaited()
     assert any("滑块验证" in m for _, m in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_run_step_captcha_resolved_reruns_action():
+    # max_retries=0：重试循环只跑 1 次（失败），成功只能来自验证码解除后的重跑
+    ctx, log = make_ctx(max_retries=0)
+    page = AsyncMock()
+    calls = [0]
+
+    async def flaky():
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("第一次失败")
+        return "ok2"
+
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value="滑块验证")), \
+         patch("app.steps.wait_manual_captcha", new=AsyncMock(return_value=True)):
+        result = await _run_step(ctx, 6, "验证码重跑步骤", flaky, page)
+    assert result == "ok2"
+    assert calls[0] == 2
+    assert any("重新执行" in m for _, m in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_run_step_captcha_resolved_rerun_still_fails():
+    ctx, log = make_ctx(max_retries=0)
+    page = AsyncMock()
+    calls = [0]
+
+    async def always_fail():
+        calls[0] += 1
+        raise RuntimeError("一直失败")
+
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value="滑块验证")), \
+         patch("app.steps.wait_manual_captcha", new=AsyncMock(return_value=True)):
+        with pytest.raises(StepFailed, match="验证码重跑步骤"):
+            await _run_step(ctx, 7, "验证码重跑步骤", always_fail, page)
+    assert calls[0] == 2
+    assert any("重新执行" in m for _, m in log.lines)

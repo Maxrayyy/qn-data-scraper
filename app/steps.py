@@ -168,15 +168,21 @@ async def _run_step(
     action: Callable[[], Awaitable],
     page: Page,
 ):
-    """执行一个内置步骤：停止检查 → 执行（失败自动重试）→ 验证码检查 → 中文日志。"""
+    """执行一个内置步骤：停止检查 → 执行（失败自动重试）→ 验证码检查 → 中文日志。
+
+    若动作在所有尝试后仍未成功、随后验证码被人工解除，会重新执行一次该步骤；
+    重跑仍失败（或始终无验证码且动作失败）时抛 StepFailed。
+    """
     ctx.emit("info", f"【第 {step_no} 步】{name}…")
     _check_stop(ctx)
     result = None
+    succeeded = False
     last_err: Exception | None = None
     for attempt in range(1, ctx.max_retries + 2):  # 1 次正式 + N 次重试
         _check_stop(ctx)
         try:
             result = await action()
+            succeeded = True
             break
         except TaskStopped:
             raise
@@ -192,8 +198,6 @@ async def _run_step(
         if attempt <= ctx.max_retries:
             ctx.emit("info", f"2 秒后重试（{attempt}/{ctx.max_retries}）…")
             await asyncio.sleep(2)
-    else:
-        raise StepFailed(f"第 {step_no} 步『{name}』失败：{last_err}")
     # 每步之后统一验证码检查
     hit = await detect_captcha(page)
     if hit:
@@ -203,6 +207,19 @@ async def _run_step(
             if ctx.stop_event.is_set():
                 raise TaskStopped()
             raise StepFailed(f"验证码等待超时（{CAPTCHA_MAX_WAIT_SECONDS} 秒未处理），任务终止")
+        if not succeeded:
+            # 验证码可能一直遮住页面导致动作未成功：解除后重新执行一次
+            ctx.emit("info", f"验证码已解除，重新执行第 {step_no} 步『{name}』…")
+            _check_stop(ctx)
+            try:
+                result = await action()
+                succeeded = True
+            except TaskStopped:
+                raise
+            except Exception as e:
+                last_err = e
+    if not succeeded:
+        raise StepFailed(f"第 {step_no} 步『{name}』失败：{last_err}")
     ctx.emit("success", f"第 {step_no} 步『{name}』完成。")
     return result
 
