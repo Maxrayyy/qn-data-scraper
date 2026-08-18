@@ -1,0 +1,101 @@
+import asyncio
+import threading
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from app.steps import StepFailed, StepsContext, TaskStopped, _run_step
+
+
+class FakeLog:
+    def __init__(self):
+        self.lines = []
+
+    def __call__(self, level, msg):
+        self.lines.append((level, msg))
+
+    def text(self):
+        return "\n".join(f"[{l}] {m}" for l, m in self.lines)
+
+
+def make_ctx(max_retries=1):
+    log = FakeLog()
+    ctx = StepsContext(
+        log=log,
+        stop_event=threading.Event(),
+        timeout_ms=30000,
+        context=None,          # 测试不下载图片
+        temp_dir=Path("/tmp"),
+        max_retries=max_retries,
+    )
+    return ctx, log
+
+
+@pytest.mark.asyncio
+async def test_run_step_success_first_try():
+    ctx, log = make_ctx()
+    page = AsyncMock()
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value=None)):
+        result = await _run_step(ctx, 1, "测试步骤", lambda: _ok("done"), page)
+    assert result == "done"
+    assert any("第 1 步『测试步骤』完成" in m for _, m in log.lines)
+
+
+async def _ok(value):
+    await asyncio.sleep(0)
+    return value
+
+
+async def _fail_twice_then_ok(calls):
+    calls[0] += 1
+    if calls[0] <= 2:
+        raise RuntimeError("模拟失败")
+    return "recovered"
+
+
+@pytest.mark.asyncio
+async def test_run_step_retries_then_succeeds():
+    ctx, log = make_ctx(max_retries=2)
+    page = AsyncMock()
+    calls = [0]
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value=None)):
+        result = await _run_step(ctx, 2, "重试步骤", lambda: _fail_twice_then_ok(calls), page)
+    assert result == "recovered"
+    assert any("重试" in m for _, m in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_run_step_all_attempts_fail_raises():
+    ctx, log = make_ctx(max_retries=1)
+    page = AsyncMock()
+
+    async def always_fail():
+        raise RuntimeError("坏掉了")
+
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value=None)):
+        with pytest.raises(StepFailed, match="永远失败"):
+            await _run_step(ctx, 3, "永远失败", always_fail, page)
+
+
+@pytest.mark.asyncio
+async def test_run_step_stopped_before_start():
+    ctx, log = make_ctx()
+    ctx.stop_event.set()
+    page = AsyncMock()
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value=None)):
+        with pytest.raises(TaskStopped):
+            await _run_step(ctx, 4, "被停止", lambda: _ok(1), page)
+
+
+@pytest.mark.asyncio
+async def test_run_step_captcha_pause_then_continue():
+    ctx, log = make_ctx()
+    page = AsyncMock()
+    with patch("app.steps.detect_captcha", new=AsyncMock(return_value="滑块验证")) as det, \
+         patch("app.steps.wait_manual_captcha", new=AsyncMock(return_value=True)) as wait:
+        result = await _run_step(ctx, 5, "验证码步骤", lambda: _ok("pass"), page)
+    assert result == "pass"
+    det.assert_awaited()
+    wait.assert_awaited()
+    assert any("滑块验证" in m for _, m in log.lines)
