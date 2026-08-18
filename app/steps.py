@@ -504,7 +504,7 @@ async def _extract_popup_items(
             name=(d.get("name", "") or "").strip(),
             item_url=d.get("href", ""),
             product_id=resolve_product_id(
-                d.get("href", ""), normalize_image_url(d.get("img", ""))
+                d.get("idText", ""), d.get("href", ""), normalize_image_url(d.get("img", ""))
             ),
             orders=d.get("orders", ""),
             price=d.get("price", ""),

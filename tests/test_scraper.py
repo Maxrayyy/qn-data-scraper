@@ -23,27 +23,43 @@ def test_extract_product_id_none():
 
 
 def test_resolve_product_id_fallback_to_image():
-    # href 无 id，图片 URL 有 id → 回退取图片 id
+    # 无可见数字、href 无 id，图片 URL 有 id → 回退取图片 id
     assert (
         resolve_product_id(
-            "https://item.taobao.com/item.htm", "https://img.alicdn.com/abc?id=777777"
+            "", "https://item.taobao.com/item.htm", "https://img.alicdn.com/abc?id=777777"
         )
         == "777777"
     )
 
 
 def test_resolve_product_id_both_missing():
-    assert resolve_product_id("https://example.com/x", "https://img.alicdn.com/y.jpg") == ""
+    assert (
+        resolve_product_id("", "https://example.com/x", "https://img.alicdn.com/y.jpg")
+        == ""
+    )
 
 
 def test_resolve_product_id_href_wins():
-    # href 有 id 时优先于图片 URL
+    # 无可见数字、href 有 id 时优先于图片 URL
     assert (
         resolve_product_id(
+            "",
             "https://item.taobao.com/item.htm?id=555555",
             "https://img.alicdn.com/z.jpg?id=999999",
         )
         == "555555"
+    )
+
+
+def test_resolve_product_id_prefers_id_text():
+    # 名字下方可见数字 id 优先于链接/图片中的不同 id（含首尾空白去除）
+    assert (
+        resolve_product_id(
+            "  1067290266725  ",
+            "https://item.taobao.com/item.htm?id=111111",
+            "https://img.alicdn.com/z.jpg?id=999999",
+        )
+        == "1067290266725"
     )
 
 
@@ -60,9 +76,11 @@ FIXTURE_WITH_HEADER = """
 <div id="popup">
   <div class="header"><span>商品</span><span>支付单量</span><span>件单价</span></div>
   <div class="row">
-    <a href="https://item.taobao.com/item.htm?id=111111">
-      <img src="//img.alicdn.com/a.jpg"><span>猫别墅A</span>
-    </a>
+    <div class="cell">
+      <a href="https://item.taobao.com/item.htm?id=111111">
+        <img src="//img.alicdn.com/a.jpg"><span>猫别墅A</span>
+      </a><span class="id">1067290266725</span>
+    </div>
     <span>1,234</span><span>¥99.00</span>
   </div>
   <div class="row">
@@ -76,8 +94,10 @@ FIXTURE_WITH_HEADER = """
 
 FIXTURE_NO_HEADER = """
 <div id="popup">
-  <div class="row"><a href="https://item.taobao.com/item.htm?id=333333">
-    <img src="//img.alicdn.com/c.jpg"></a><span>20</span><span>¥50</span></div>
+  <div class="row"><div class="cell">
+    <a href="https://item.taobao.com/item.htm?id=333333">
+      <img src="//img.alicdn.com/c.jpg"><span>猫粮碗C</span>
+    </a><span class="id">1067290266726</span></div><span>20</span><span>¥50</span></div>
 </div>
 """
 
@@ -100,7 +120,9 @@ def test_extract_js_with_header_rows():
     assert data[0]["img"] == "//img.alicdn.com/a.jpg"
     assert data[0]["orders"] == "1,234"
     assert data[0]["price"] == "¥99.00"
+    assert data[0]["idText"] == "1067290266725"
     assert data[1]["name"] == "猫笼子B"
+    assert data[1]["idText"] == ""
 
 
 def test_extract_js_no_header_fallback():
@@ -109,3 +131,4 @@ def test_extract_js_no_header_fallback():
     assert data[0]["href"].endswith("id=333333")
     assert data[0]["orders"] == "20"
     assert data[0]["price"] == "¥50"
+    assert data[0]["idText"] == "1067290266726"

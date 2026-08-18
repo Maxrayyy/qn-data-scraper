@@ -34,9 +34,9 @@ def extract_product_id(url: str) -> str:
     return ""
 
 
-def resolve_product_id(item_url: str, image_url: str) -> str:
-    """优先从商品链接提取商品id；失败回退从图片 URL 提取；仍失败返回空串。"""
-    return extract_product_id(item_url) or extract_product_id(image_url)
+def resolve_product_id(id_text: str, item_url: str, image_url: str) -> str:
+    """商品id解析优先级：名字下方可见数字 > 商品链接 > 图片 URL。"""
+    return (id_text or "").strip() or extract_product_id(item_url) or extract_product_id(image_url)
 
 
 def normalize_image_url(url: str) -> str:
@@ -56,6 +56,21 @@ def normalize_image_url(url: str) -> str:
 #   纯文本兄弟节点依次视为支付单量、件单价。
 EXTRACT_JS = """
 (root) => {
+  // 在商品格内找"纯数字叶子元素"：自身文本为 6-15 位纯数字
+  function findIdText(cell) {
+    if (!cell) return '';
+    const leaves = [cell, ...cell.querySelectorAll('*')];
+    let best = '';
+    for (const el of leaves) {
+      const t = (el.textContent || '').trim();
+      if (/^\\d{6,15}$/.test(t) && el.children.length === 0 && t.length > best.length) best = t;
+    }
+    if (!best) {
+      const m = (cell.textContent || '').match(/\\d{6,15}/g);
+      if (m) best = m.reduce((a, b) => (b.length > a.length ? b : a), '');
+    }
+    return best;
+  }
   const flat = [...root.querySelectorAll('div,li,tr')];
   const hPrice = flat.find(el =>
     (el.textContent || '').trim() === '件单价' && el.children.length <= 2);
@@ -85,6 +100,7 @@ EXTRACT_JS = """
             name: (a.textContent || '').trim() || img.alt || '',
             href: a.href || '',
             img: img.src || img.dataset.src || '',
+            idText: findIdText(row.children[0]),
             orders: colIdx >= 1 && cells[colIdx - 1] ? (cells[colIdx - 1].textContent || '').trim() : '',
             price: cells[colIdx] ? (cells[colIdx].textContent || '').trim() : '',
           });
@@ -115,6 +131,7 @@ EXTRACT_JS = """
         name: (a.textContent || '').trim() || img.alt || '',
         href: a.href || '',
         img: (img && (img.src || img.dataset.src)) || '',
+        idText: findIdText(row.sibs[row.idx]),
         orders: (row.sibs[row.idx + 1].textContent || '').trim(),
         price: (row.sibs[row.idx + 2].textContent || '').trim(),
       });
