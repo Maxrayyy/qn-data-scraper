@@ -399,7 +399,11 @@ async def _locate_selector_with_hits(root, key: str) -> str | None:
 
 
 async def _human_click(el: Locator, min_delay: float = 0.2) -> None:
-    """模拟人工点击：先滚动到可视区并悬停，随机停顿后点击。"""
+    """模拟人工点击：先滚动到可视区并悬停，随机停顿后点击。
+
+    安全提示弹窗（baxia 遮罩）可能在任何时刻出现并拦截点击：
+    每次点击用短超时，被拦截则自动关闭遮挡弹窗后重试（最多 4 次）。
+    """
     try:
         await el.scroll_into_view_if_needed()
     except Exception:
@@ -409,7 +413,19 @@ async def _human_click(el: Locator, min_delay: float = 0.2) -> None:
         await asyncio.sleep(random.uniform(min_delay, min_delay + 0.5))
     except Exception:
         pass
-    await el.click()
+    last_err: Exception | None = None
+    for _ in range(4):
+        try:
+            await el.click(timeout=8000)
+            return
+        except Exception as e:
+            last_err = e
+            try:
+                await _dismiss_popups(el.page, None)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+    raise last_err  # type: ignore[misc]
 
 
 async def _human_type(el: Locator, text: str) -> None:
@@ -427,11 +443,11 @@ async def _click_first(page: Page, key: str, name: str) -> None:
     await _human_click(el)
 
 
-async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
+async def _dismiss_popups(page: Page, ctx: StepsContext | None) -> int:
     """关闭遮挡操作的弹窗（如登录后的安全检测弹窗）：点可见弹窗的关闭按钮，失败按 Esc。
 
     最多处理 3 个弹窗，返回关闭数量。不会影响第 9 步的『商品发现』弹窗
-    （该步执行时弹窗已由步骤自身关闭）。
+    （该步执行时弹窗已由步骤自身关闭）。ctx 可为 None（静默关闭）。
     """
     closed = 0
     for _ in range(3):
