@@ -1,0 +1,39 @@
+name: 构建Windows版本exe
+
+on:
+  workflow_dispatch: {}   # 允许手动触发
+  push:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: browsers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 下载内置浏览器
+        run: python -m playwright install chromium
+
+      - name: 运行单元测试
+        run: pytest tests/ -q
+
+      - name: 打包 exe
+        run: python -m PyInstaller scraper.spec --noconfirm
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 千牛数据抓取工具-Windows版
+          path: dist/千牛数据抓取工具/
+          retention-days: 90
