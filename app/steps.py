@@ -305,6 +305,36 @@ async def _locate_first(root, key: str) -> Locator | None:
     return None
 
 
+async def _check_remember_password(frame) -> None:
+    """勾选登录框内"记住密码"复选框（尽力而为：让淘宝信任本设备，减少短信验证）。"""
+    try:
+        box = frame.locator("input[type='checkbox']")
+        n = await box.count()
+        for i in range(min(n, 5)):
+            el = box.nth(i)
+            try:
+                if await el.is_visible() and not await el.is_checked():
+                    await el.check()
+                    return
+            except Exception:
+                try:
+                    await el.click()
+                    return
+                except Exception:
+                    continue
+        # 回退：点击含"记住"文字的标签
+        for sel in ("label:has-text('记住')", "[class*='remember']"):
+            try:
+                el = frame.locator(sel).first
+                if await el.count() > 0 and await el.is_visible():
+                    await el.click()
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 async def _locate_selector_with_hits(page: Page, key: str) -> str | None:
     """返回 STEP_LOCATORS[key] 中第一个存在可见元素的候选定位器字符串。"""
     for sel in STEP_LOCATORS.get(key, []):
@@ -327,6 +357,62 @@ async def _click_first(page: Page, key: str, name: str) -> None:
     await el.click()
 
 
+async def _dismiss_popups(page: Page, ctx: StepsContext) -> int:
+    """关闭遮挡操作的弹窗（如登录后的安全检测弹窗）：点可见弹窗的关闭按钮，失败按 Esc。
+
+    最多处理 3 个弹窗，返回关闭数量。不会影响第 9 步的『商品发现』弹窗
+    （该步执行时弹窗已由步骤自身关闭）。
+    """
+    closed = 0
+    for _ in range(3):
+        dialog = None
+        for sel in STEP_LOCATORS["弹窗容器"]:
+            try:
+                loc = page.locator(sel)
+                n = await loc.count()
+                for i in range(n - 1, -1, -1):
+                    if await loc.nth(i).is_visible():
+                        dialog = loc.nth(i)
+                        break
+            except Exception:
+                continue
+            if dialog:
+                break
+        if dialog is None:
+            break
+        done = False
+        for sel in STEP_LOCATORS["弹窗关闭按钮"]:
+            try:
+                loc = page.locator(sel)
+                n = await loc.count()
+                for i in range(n - 1, -1, -1):
+                    if await loc.nth(i).is_visible():
+                        await loc.nth(i).click()
+                        closed += 1
+                        done = True
+                        break
+            except Exception:
+                continue
+            if done:
+                break
+        if not done:
+            try:
+                await page.keyboard.press("Escape")
+                closed += 1
+            except Exception:
+                break
+        await asyncio.sleep(0.5)
+    if closed:
+        ctx.emit("info", f"已关闭 {closed} 个遮挡弹窗。")
+    return closed
+
+
+async def _click_nav(page: Page, ctx: StepsContext, key: str, name: str) -> None:
+    """导航点击：先关闭可能遮挡的弹窗，再点击目标元素。"""
+    await _dismiss_popups(page, ctx)
+    await _click_first(page, key, name)
+
+
 # ============================ 内置步骤 1-9 ============================
 
 async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> FlowResult:
@@ -335,10 +421,10 @@ async def run_builtin_flow(page: Page, cfg: AppConfig, ctx: StepsContext) -> Flo
     await _run_step(ctx, 1, "打开登录页", lambda: _step_open_login(page, cfg, ctx), page)
     await _run_step(ctx, 2, "填写账号密码并登录", lambda: _step_login(page, cfg, ctx), page)
     await _run_step(ctx, 3, "等待登录成功跳转工作台", lambda: _step_wait_login(page, ctx), page)
-    await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _click_first(page, "左侧数据菜单", "数据"), page)
-    await _run_step(ctx, 5, "点击上方页签「市场」", lambda: _click_first(page, "上方市场页签", "市场"), page)
-    await _run_step(ctx, 6, "点击左侧菜单「类目洞察」", lambda: _click_first(page, "左侧类目洞察菜单", "类目洞察"), page)
-    await _run_step(ctx, 7, "点击「价格分析」", lambda: _click_first(page, "价格分析页签", "价格分析"), page)
+    await _run_step(ctx, 4, "点击左侧菜单「数据」", lambda: _click_nav(page, ctx, "左侧数据菜单", "数据"), page)
+    await _run_step(ctx, 5, "点击上方页签「市场」", lambda: _click_nav(page, ctx, "上方市场页签", "市场"), page)
+    await _run_step(ctx, 6, "点击左侧菜单「类目洞察」", lambda: _click_nav(page, ctx, "左侧类目洞察菜单", "类目洞察"), page)
+    await _run_step(ctx, 7, "点击「价格分析」", lambda: _click_nav(page, ctx, "价格分析页签", "价格分析"), page)
     await _run_step(ctx, 8, f"切换类目为「{CATEGORY_NAME}」", lambda: _step_switch_category(page, ctx), page)
     result.rows = await _run_step(
         ctx, 9, "遍历分析明细抓取『商品发现』数据", lambda: _step_collect(page, ctx), page
@@ -382,6 +468,8 @@ async def _step_login(page: Page, cfg: AppConfig, ctx: StepsContext) -> None:
             if field is None:
                 raise StepFailed(f"找不到{'账号' if '账号' in key else '密码'}输入框，登录页可能已改版")
             await field.fill(value)
+        # 勾选"记住密码"（可让淘宝信任本设备，减少后续短信验证），尽力而为
+        await _check_remember_password(frame)
         login_btn = await _locate_first(frame, "登录按钮")
         if login_btn is None:
             raise StepFailed("找不到登录按钮，登录页可能已改版")
@@ -435,6 +523,7 @@ async def _step_wait_login(page: Page, ctx: StepsContext) -> None:
 # ---- 第 8 步：切换类目 ----
 
 async def _step_switch_category(page: Page, ctx: StepsContext) -> None:
+    await _dismiss_popups(page, ctx)
     switcher = await _locate_first(page, "类目切换区")
     if switcher is None:
         raise StepFailed("找不到类目切换区，请检查 steps.py『类目切换区』定位器")
